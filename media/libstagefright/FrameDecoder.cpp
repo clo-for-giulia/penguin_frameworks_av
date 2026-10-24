@@ -507,6 +507,17 @@ FrameDecoder::~FrameDecoder() {
 }
 
 bool isHDR(const sp<AMessage> &format) {
+#ifdef TARGET_SUPPORTS_DOLBY_VISION
+    AString mime;
+    if (format->findString("mime", &mime)
+            && mime.equalsIgnoreCase(MEDIA_MIMETYPE_VIDEO_DOLBY_VISION)) {
+        // Dolby Vision color aspects may only become available from the
+        // decoder's output format. Use the surface path for thumbnails so
+        // the decoder can provide a graphic buffer without byte-buffer stride.
+        return true;
+    }
+#endif
+
     uint32_t standard, transfer;
     if (!format->findInt32("color-standard", (int32_t*)&standard)) {
         standard = 0;
@@ -879,7 +890,12 @@ status_t FrameDecoder::handleOutputBufferAsync(int32_t index, int64_t timeUs) {
     err = mDecoder->getOutputBuffer(index, &videoFrameBuffer);
     if (err != OK || videoFrameBuffer == nullptr) {
         ALOGE("failed to get output buffer %d", index);
+#ifdef TARGET_SUPPORTS_DOLBY_VISION
+        onDecoderError(err != OK ? err : ERROR_MALFORMED);
+        return err != OK ? err : ERROR_MALFORMED;
+#else
         return err;
+#endif
     }
 
     bool onOutputReceivedDone = false;
@@ -895,6 +911,10 @@ status_t FrameDecoder::handleOutputBufferAsync(int32_t index, int64_t timeUs) {
                 || c2buffer->data().type() != C2BufferData::GRAPHIC
                 || c2buffer->data().graphicBlocks().size() == 0u) {
             ALOGE("C2Buffer precond fail");
+#ifdef TARGET_SUPPORTS_DOLBY_VISION
+            mDecoder->releaseOutputBuffer(index);
+            onDecoderError(ERROR_MALFORMED);
+#endif
             return ERROR_MALFORMED;
         }
 
@@ -903,6 +923,10 @@ status_t FrameDecoder::handleOutputBufferAsync(int32_t index, int64_t timeUs) {
         GraphicView2MediaImageConverter converter(*view, mOutputFormat, false /* copy */);
         if (converter.initCheck() != OK) {
             ALOGE("Converter init failed: %d", converter.initCheck());
+#ifdef TARGET_SUPPORTS_DOLBY_VISION
+            mDecoder->releaseOutputBuffer(index);
+            onDecoderError(NO_INIT);
+#endif
             return NO_INIT;
         }
 
@@ -921,6 +945,13 @@ status_t FrameDecoder::handleOutputBufferAsync(int32_t index, int64_t timeUs) {
         err = onOutputReceived(frameData, imageData, mOutputFormat, timeUs, &onOutputReceivedDone);
         mDecoder->releaseOutputBuffer(index);
     }
+
+#ifdef TARGET_SUPPORTS_DOLBY_VISION
+    if (err != OK) {
+        onDecoderError(err);
+        return err;
+    }
+#endif
 
     if (err == OK && onOutputReceivedDone) {
         std::unique_lock lock(mMutex);
